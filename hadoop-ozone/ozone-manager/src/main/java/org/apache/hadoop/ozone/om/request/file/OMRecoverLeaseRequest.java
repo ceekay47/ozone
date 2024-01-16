@@ -40,6 +40,9 @@ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.OMRespo
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.OMRequest;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RecoverLeaseRequest;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.RecoverLeaseResponse;
+
+import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_OM_LEASE_SOFT_LIMIT;
+import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_OM_LEASE_SOFT_LIMIT_DEFAULT;
 import static org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.Type.RecoverLease;
 
 import org.apache.hadoop.ozone.security.acl.IAccessAuthorizer;
@@ -56,9 +59,11 @@ import java.nio.file.Paths;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes.KEY_ALREADY_CLOSED;
 import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes.KEY_NOT_FOUND;
+import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes.KEY_UNDER_LEASE_SOFT_LIMIT_PERIOD;
 import static org.apache.hadoop.ozone.om.lock.OzoneManagerLock.Resource.BUCKET_LOCK;
 
 /**
@@ -75,6 +80,7 @@ public class OMRecoverLeaseRequest extends OMKeyRequest {
   private String dbFileKey;
   private OmKeyInfo openKeyInfo;
   private String dbOpenFileKey;
+  private boolean force;
 
   private OMMetadataManager omMetadataManager;
 
@@ -87,6 +93,7 @@ public class OMRecoverLeaseRequest extends OMKeyRequest {
     volumeName = recoverLeaseRequest.getVolumeName();
     bucketName = recoverLeaseRequest.getBucketName();
     keyName = recoverLeaseRequest.getKeyName();
+    force = recoverLeaseRequest.getForce();
   }
 
   @Override
@@ -144,7 +151,6 @@ public class OMRecoverLeaseRequest extends OMKeyRequest {
       RecoverLeaseResponse recoverLeaseResponse = doWork(ozoneManager, transactionLogIndex);
 
       // Prepare response
-      boolean responseCode = true;
       omResponse.setRecoverLeaseResponse(recoverLeaseResponse).setCmdType(RecoverLease);
       omClientResponse = new OMRecoverLeaseResponse(omResponse.build(), getBucketLayout(),
           dbOpenFileKey, openKeyInfo);
@@ -212,6 +218,12 @@ public class OMRecoverLeaseRequest extends OMKeyRequest {
     if (openKeyInfo.getMetadata().containsKey(OzoneConsts.LEASE_RECOVERY)) {
       LOG.debug("Key: " + keyName + " is already under recovery");
     } else {
+      final long leaseSoftLimit = ozoneManager.getConfiguration()
+          .getTimeDuration(OZONE_OM_LEASE_SOFT_LIMIT, OZONE_OM_LEASE_SOFT_LIMIT_DEFAULT, TimeUnit.MILLISECONDS);
+      if (!force && Time.now() < openKeyInfo.getModificationTime() + leaseSoftLimit) {
+        throw new OMException("Open Key " + keyName + " updated recently and is inside soft limit period",
+            KEY_UNDER_LEASE_SOFT_LIMIT_PERIOD);
+      }
       openKeyInfo.getMetadata().put(OzoneConsts.LEASE_RECOVERY, "true");
       openKeyInfo.setUpdateID(transactionLogIndex, ozoneManager.isRatisEnabled());
       openKeyInfo.setModificationTime(Time.now());
